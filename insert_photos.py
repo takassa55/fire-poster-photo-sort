@@ -4,8 +4,12 @@ template_ホームページ用.docx をもとにホームページ用_完成.doc
 【処理の流れ】
   template_ホームページ用.docx（テンプレート）
       ↓ コピーして土台にする
-  各表の写真セルに「写真」フォルダの対応画像を挿入（縦110mm）
-  各表のファイル名セルに画像ファイル名（拡張子なし）を記載
+  ★ フェーズ1（連番方式）
+      各表の写真セルに「写真」フォルダの連番フォルダ（00_xxx, 01_xxx ...）の画像を挿入
+      → 金賞テーブルを対象とする
+  ★ フェーズ2（賞カテゴリ方式）
+      【銀賞】【銅賞】【入選】の各セクションに対して、
+      対応する賞名を含むフォルダ（例: 銀賞_xxx）の画像を順番に挿入
       ↓
   ホームページ用_完成.docx として出力
 
@@ -14,11 +18,17 @@ template_ホームページ用.docx をもとにホームページ用_完成.doc
 ├── template_ホームページ用.docx  ← テンプレート（変更しない）
 ├── insert_photos.py               ← このスクリプト
 └── 写真/
-    ├── 00_大垣市長賞/
+    ├── 00_大垣市長賞/             ← 金賞（連番）
     │   └── （写真ファイル）
     ├── 01_神戸町長賞/
     │   └── （写真ファイル）
-    └── ...（以降 02, 03, ... と続く）
+    ├── ...（以降 02, 03, ... と続く）
+    ├── 銀賞_xxx/                  ← 銀賞（「銀賞」を含む名前）
+    │   └── （写真ファイル複数可）
+    ├── 銅賞_xxx/                  ← 銅賞（「銅賞」を含む名前）
+    │   └── （写真ファイル）
+    └── 入選_xxx/                  ← 入選（「入選」を含む名前）
+        └── （写真ファイル）
 
 【HEIC/HEIF 対応】
   pillow-heif をインストールすると HEIC ファイルを直接処理できます。
@@ -26,13 +36,11 @@ template_ホームページ用.docx をもとにホームページ用_完成.doc
   未インストールの場合は ffmpeg または ImageMagick で自動変換を試みます。
 """
 
-import os
 import sys
 import shutil
 import zipfile
 import re
 import subprocess
-import io
 from pathlib import Path
 
 # ── Pillow と pillow-heif の読み込み ─────────────────────────────────
@@ -41,7 +49,7 @@ from PIL import Image
 HEIF_AVAILABLE = False
 try:
     import pillow_heif
-    pillow_heif.register_heif_opener()   # Image.open() で HEIC を透過的に開けるようにする
+    pillow_heif.register_heif_opener()
     HEIF_AVAILABLE = True
     print("[情報] pillow-heif 有効 → HEIC/HEIF ファイルを直接処理します")
 except ImportError:
@@ -52,17 +60,22 @@ except ImportError:
 # ============================================================
 # 設定
 # ============================================================
-TEMPLATE_DOCX    = "template_ホームページ用.docx"  # 入力テンプレート（コピーして使用）
-OUTPUT_DOCX      = "ホームページ用_完成.docx"       # 出力ファイル名
-PHOTO_DIR        = "写真"                            # 写真フォルダ名
-TARGET_HEIGHT_MM = 110                               # 写真の縦サイズ（mm）
+TEMPLATE_DOCX    = "template_ホームページ用.docx"
+OUTPUT_DOCX      = "ホームページ用_完成.docx"
+PHOTO_DIR        = "写真"
+TARGET_HEIGHT_MM = 110
 
-EMU_PER_MM        = 914400 / 25.4              # 1 mm → EMU
+EMU_PER_MM        = 914400 / 25.4
 TARGET_HEIGHT_EMU = int(TARGET_HEIGHT_MM * EMU_PER_MM)
 
-# 検索対象の画像拡張子（HEIC/HEIF を先に含める）
+# フェーズ1（連番方式）で処理する賞の見出し
+SEQUENTIAL_AWARD = "金賞"
+
+# フェーズ2（カテゴリ名マッチ）で処理する賞の見出しとフォルダキーワード
+CATEGORY_AWARDS = ["銀賞", "銅賞", "入選"]
+
 IMAGE_EXTENSIONS = [
-    ".heic", ".heif",                          # iPhone 形式
+    ".heic", ".heif",
     ".jpg", ".jpeg", ".png",
     ".gif", ".bmp", ".tiff", ".tif",
 ]
@@ -73,20 +86,26 @@ IMAGE_EXTENSIONS = [
 # ============================================================
 
 def find_photo_in_folder(folder_path: Path):
-    """
-    フォルダ内の最初の画像ファイルを返す。
-    glob の大文字小文字問題を避けるため、全ファイルを列挙して拡張子で比較する。
-    HEIC/HEIF を優先して返す（pillow-heif で確実に読めるため）。
-    """
+    """フォルダ内の最初の画像ファイルを返す（HEIC/HEIF 優先）"""
     ext_set = {e.lower() for e in IMAGE_EXTENSIONS}
     all_files = sorted([f for f in folder_path.iterdir()
                         if f.is_file() and f.suffix.lower() in ext_set])
-    heic = [f for f in all_files if f.suffix.lower() in (".heic", ".heif")]
+    heic  = [f for f in all_files if f.suffix.lower() in (".heic", ".heif")]
     other = [f for f in all_files if f.suffix.lower() not in (".heic", ".heif")]
     ordered = heic + other
     if ordered:
         print(f"    [検索] {folder_path.name}: {ordered[0].name} を選択")
     return ordered[0] if ordered else None
+
+
+def find_all_photos_in_folder(folder_path: Path):
+    """フォルダ内の全画像ファイルをソート順（HEIC/HEIF 優先）で返す"""
+    ext_set = {e.lower() for e in IMAGE_EXTENSIONS}
+    all_files = sorted([f for f in folder_path.iterdir()
+                        if f.is_file() and f.suffix.lower() in ext_set])
+    heic  = [f for f in all_files if f.suffix.lower() in (".heic", ".heif")]
+    other = [f for f in all_files if f.suffix.lower() not in (".heic", ".heif")]
+    return heic + other
 
 
 def get_folder_by_index(photo_base: Path, index: int):
@@ -97,16 +116,29 @@ def get_folder_by_index(photo_base: Path, index: int):
     return candidates[0] if candidates else None
 
 
+def collect_photos_for_award(photo_base: Path, award_name: str):
+    """
+    award_name を含む全フォルダから画像ファイルを順番に収集して返す。
+    戻り値: [(folder_path, photo_path), ...]
+    """
+    folders = sorted([p for p in photo_base.iterdir()
+                      if p.is_dir() and award_name in p.name])
+    if not folders:
+        print(f"  [警告] 「{award_name}」を含むフォルダが見つかりません")
+        return []
+    result = []
+    for folder in folders:
+        for photo in find_all_photos_in_folder(folder):
+            result.append((folder, photo))
+    print(f"  [{award_name}] {len(folders)}フォルダ / {len(result)}枚の画像を収集")
+    return result
+
+
 # ============================================================
 # ② HEIC 判定・変換
 # ============================================================
 
 def is_heic_by_magic(path: Path) -> bool:
-    """
-    先頭 12 バイトで HEIC/HEIF を判定する。
-    ISOBMFF 系は offset=4 から 'ftyp' が来て、
-    その後に 'heic'/'heix'/'hevc'/'mif1'/'msf1'/'avif' などが続く。
-    """
     try:
         header = path.read_bytes()[:12]
         if header[4:8] != b"ftyp":
@@ -121,17 +153,11 @@ def is_heic_by_magic(path: Path) -> bool:
 
 
 def convert_heic_with_pillow_heif(src: Path, dst: Path) -> bool:
-    """pillow-heif 経由で HEIC → JPEG 変換"""
     if not HEIF_AVAILABLE:
         return False
     try:
         heif_file = pillow_heif.open_heif(str(src), convert_hdr_to_8bit=True)
-        img = Image.frombytes(
-            heif_file.mode,
-            heif_file.size,
-            heif_file.data,
-            "raw",
-        )
+        img = Image.frombytes(heif_file.mode, heif_file.size, heif_file.data, "raw")
         img.save(str(dst), format="JPEG", quality=95)
         return dst.exists() and dst.stat().st_size > 0
     except Exception as e:
@@ -140,13 +166,11 @@ def convert_heic_with_pillow_heif(src: Path, dst: Path) -> bool:
 
 
 def convert_heic_with_image_open(src: Path, dst: Path) -> bool:
-    """pillow-heif が register 済みのとき Image.open() で変換"""
     if not HEIF_AVAILABLE:
         return False
     try:
         with Image.open(src) as img:
-            img_rgb = img.convert("RGB")
-            img_rgb.save(str(dst), format="JPEG", quality=95)
+            img.convert("RGB").save(str(dst), format="JPEG", quality=95)
         return dst.exists() and dst.stat().st_size > 0
     except Exception as e:
         print(f"    [Image.open 変換エラー] {e}")
@@ -154,11 +178,10 @@ def convert_heic_with_image_open(src: Path, dst: Path) -> bool:
 
 
 def convert_heic_with_external(src: Path, dst: Path) -> bool:
-    """ffmpeg または ImageMagick で HEIC → JPEG 変換"""
     cmds = [
         ["ffmpeg", "-y", "-i", str(src), str(dst)],
         ["magick", "convert", str(src), str(dst)],
-        ["convert", str(src), str(dst)],   # ImageMagick 6 系
+        ["convert", str(src), str(dst)],
     ]
     for cmd in cmds:
         try:
@@ -173,45 +196,31 @@ def convert_heic_with_external(src: Path, dst: Path) -> bool:
 
 
 def prepare_image(photo_path: Path, tmp_jpeg_path: Path):
-    """
-    画像を Pillow が確実に読めるファイルとして返す。
-    - 通常の JPEG/PNG 等 → そのまま返す
-    - HEIC → JPEG に変換して tmp_jpeg_path を返す
-    - 変換失敗 → None を返す
-    """
+    """画像を Pillow が確実に読めるファイルとして返す。変換失敗時は None。"""
     ext = photo_path.suffix.lower()
-    # 拡張子が heic/heif なら必ず変換（マジックバイト判定に頼らない）
     need_convert = ext in (".heic", ".heif") or is_heic_by_magic(photo_path)
 
     if not need_convert:
         try:
             with Image.open(photo_path) as img:
-                img.load()   # verify() だと PNG 等で誤判定があるので load() を使う
+                img.load()
             return photo_path
         except Exception as e:
             print(f"    [Pillow 読み込みエラー: {e}] HEIC として変換を試みます")
             need_convert = True
 
     print(f"    [変換中] {photo_path.name} → JPEG ...")
-
-    # 方法1: pillow-heif 直接変換
     if convert_heic_with_pillow_heif(photo_path, tmp_jpeg_path):
         print(f"    [変換OK] pillow-heif (open_heif) 使用")
         return tmp_jpeg_path
-
-    # 方法2: Image.open（register_heif_opener 経由）
     if convert_heic_with_image_open(photo_path, tmp_jpeg_path):
         print(f"    [変換OK] Image.open (pillow-heif) 使用")
         return tmp_jpeg_path
-
-    # 方法3: 外部ツール（ffmpeg / ImageMagick）
     if convert_heic_with_external(photo_path, tmp_jpeg_path):
         print(f"    [変換OK] 外部ツール使用")
         return tmp_jpeg_path
 
-    print(f"    [変換失敗] 以下のいずれかをインストールしてください:")
-    print(f"      pip install pillow-heif")
-    print(f"      または ffmpeg / ImageMagick をインストール")
+    print(f"    [変換失敗] pip install pillow-heif または ffmpeg/ImageMagick をインストールしてください")
     return None
 
 
@@ -220,7 +229,6 @@ def prepare_image(photo_path: Path, tmp_jpeg_path: Path):
 # ============================================================
 
 def get_image_size(image_path: Path):
-    """(幅px, 高さpx) を返す。取得できなければ (1, 1)"""
     try:
         with Image.open(image_path) as img:
             return img.size
@@ -231,7 +239,6 @@ def get_image_size(image_path: Path):
 
 
 def calc_emu_width(image_path: Path, height_emu: int) -> int:
-    """アスペクト比を保ちながら幅(EMU)を計算する"""
     w_px, h_px = get_image_size(image_path)
     return int(height_emu * w_px / h_px) if h_px else height_emu
 
@@ -323,7 +330,110 @@ def ensure_content_type(ct_xml: str, ext: str) -> str:
 
 
 # ============================================================
-# ⑥ メイン処理
+# ⑥ スロット挿入の共通処理
+# ============================================================
+
+def insert_photo_to_slot(
+    tbl_elem, photo_row: int, fname_row: int, col_idx: int,
+    photo_path: Path, media_dir: Path, img_idx: int,
+    rels_xml: str, ct_xml: str, next_rid: int, W: str
+):
+    """
+    1スロット分の画像挿入処理。
+    成功時: (updated_rels_xml, updated_ct_xml, next_rid + 1, stem) を返す
+    失敗時: (rels_xml, ct_xml, next_rid, None) を返す
+    """
+    from lxml import etree
+
+    stem     = photo_path.stem
+    tmp_jpeg = media_dir / f"img_{img_idx:04d}_tmp.jpg"
+
+    ready_path = prepare_image(photo_path, tmp_jpeg)
+    if ready_path is None:
+        print(f"    → 変換失敗 → スキップ")
+        return rels_xml, ct_xml, next_rid, None
+
+    cy = TARGET_HEIGHT_EMU
+    cx = calc_emu_width(ready_path, cy)
+
+    final_ext        = ready_path.suffix.lower()
+    media_name       = f"img_{img_idx:04d}{final_ext}"
+    final_media_path = media_dir / media_name
+    if ready_path != final_media_path:
+        shutil.copy2(ready_path, final_media_path)
+    if tmp_jpeg.exists() and tmp_jpeg != final_media_path:
+        tmp_jpeg.unlink()
+
+    r_id     = f"rId{next_rid}"
+    next_rid += 1
+    rels_xml = add_image_relationship(rels_xml, r_id, media_name)
+    ct_xml   = ensure_content_type(ct_xml, final_ext)
+
+    rows = tbl_elem.findall(f"{{{W}}}tr")
+
+    photo_cell = rows[photo_row].findall(f"{{{W}}}tc")[col_idx]
+    for p in photo_cell.findall(f"{{{W}}}p"):
+        photo_cell.remove(p)
+    photo_cell.append(
+        etree.fromstring(build_image_paragraph_xml(r_id, media_name, cx, cy))
+    )
+
+    fname_cell = rows[fname_row].findall(f"{{{W}}}tc")[col_idx]
+    for p in fname_cell.findall(f"{{{W}}}p"):
+        fname_cell.remove(p)
+    fname_cell.append(
+        etree.fromstring(build_filename_paragraph_xml(stem))
+    )
+
+    return rels_xml, ct_xml, next_rid, stem
+
+
+# ============================================================
+# ⑦ ドキュメント走査：賞カテゴリ別スロット収集
+# ============================================================
+
+def collect_slots_by_award(root, W: str) -> dict:
+    """
+    ドキュメント本文を走査し、賞カテゴリごとのスロットリストを返す。
+    戻り値: { "金賞": [(tbl_elem, photo_row, fname_row, col), ...], "銀賞": [...], ... }
+    """
+    body  = root.find(f"{{{W}}}body")
+    items = list(body)
+
+    all_awards     = [SEQUENTIAL_AWARD] + CATEGORY_AWARDS
+    slots_by_award = {award: [] for award in all_awards}
+    current_award  = None
+
+    for elem in items:
+        tag = elem.tag.split("}")[1]
+        if tag == "p":
+            text = "".join(t.text or "" for t in elem.findall(f".//{{{W}}}t")).strip()
+            for award in all_awards:
+                if text == f"【{award}】":
+                    current_award = award
+                    break
+        elif tag == "tbl" and current_award:
+            rows   = elem.findall(f"{{{W}}}tr")
+            n_rows = len(rows)
+            if n_rows == 3:
+                n_cols = len(rows[1].findall(f"{{{W}}}tc"))
+                for c in range(n_cols):
+                    slots_by_award[current_award].append((elem, 1, 2, c))
+            elif n_rows == 6:
+                n_cols = len(rows[1].findall(f"{{{W}}}tc"))
+                for c in range(n_cols):
+                    slots_by_award[current_award].append((elem, 1, 2, c))
+                for c in range(n_cols):
+                    slots_by_award[current_award].append((elem, 4, 5, c))
+
+    for award in all_awards:
+        print(f"  [{award}] スロット数: {len(slots_by_award[award])}")
+
+    return slots_by_award
+
+
+# ============================================================
+# ⑧ メイン処理
 # ============================================================
 
 def main():
@@ -344,7 +454,7 @@ def main():
 
     W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
-    # ── テンプレートを ZIP 展開（これが処理の土台）──
+    # ── テンプレートを ZIP 展開 ──
     print(f"[テンプレート読み込み] {template_path.name}")
     tmp_dir = base_dir / "_docx_tmp"
     if tmp_dir.exists():
@@ -364,101 +474,95 @@ def main():
     existing_ids = re.findall(r'Id="rId(\d+)"', rels_xml)
     next_rid = max((int(x) for x in existing_ids), default=0) + 1
 
-    # ── DOM 解析（テンプレートをそのまま使う）──
     tree = etree.parse(str(doc_xml_path))
     root = tree.getroot()
-    tables = root.findall(f".//{{{W}}}tbl")
 
-    # スロット列挙（テンプレートの表構造から生成）
-    slots = []
-    for t_idx, tbl in enumerate(tables):
-        rows = tbl.findall(f"{{{W}}}tr")
-        if len(rows) == 3:
-            n = len(rows[1].findall(f"{{{W}}}tc"))
-            for c in range(n):
-                slots.append((t_idx, 1, 2, c))
-        elif len(rows) == 6:
-            for photo_row, fname_row in [(1, 2), (4, 5)]:
-                n = len(rows[photo_row].findall(f"{{{W}}}tc"))
-                for c in range(n):
-                    slots.append((t_idx, photo_row, fname_row, c))
-
-    print(f"スロット総数: {len(slots)}\n")
+    # ── スロット収集 ──
+    print("\n[スロット収集]")
+    slots_by_award = collect_slots_by_award(root, W)
 
     inserted = skipped = 0
+    img_idx  = 0  # メディアファイル名用グローバル連番
 
-    for folder_idx, (t_idx, photo_row, fname_row, col_idx) in enumerate(slots):
+    # ══════════════════════════════════════════════════════════
+    # フェーズ1：連番方式で金賞スロットへ挿入
+    # ══════════════════════════════════════════════════════════
+    print(f"\n[フェーズ1] {SEQUENTIAL_AWARD}（連番フォルダ方式）")
+    seq_slots = slots_by_award[SEQUENTIAL_AWARD]
+    print(f"  スロット総数: {len(seq_slots)}")
 
+    for folder_idx, (tbl_elem, photo_row, fname_row, col_idx) in enumerate(seq_slots):
         folder_path = get_folder_by_index(photo_base, folder_idx)
         if folder_path is None:
             print(f"  [{folder_idx:02d}] フォルダなし → スキップ")
             skipped += 1
+            img_idx  += 1
             continue
 
         photo_path = find_photo_in_folder(folder_path)
         if photo_path is None:
             print(f"  [{folder_idx:02d}] {folder_path.name} → 画像なし → スキップ")
             skipped += 1
+            img_idx  += 1
             continue
 
-        stem     = photo_path.stem
-        tmp_jpeg = media_dir / f"img_{folder_idx:03d}_tmp.jpg"
-
-        # 画像の準備（HEIC 変換含む）
-        ready_path = prepare_image(photo_path, tmp_jpeg)
-        if ready_path is None:
-            print(f"  [{folder_idx:02d}] {folder_path.name} / {photo_path.name} → 変換失敗 → スキップ")
+        print(f"  [{folder_idx:02d}] {folder_path.name} / {photo_path.name}")
+        rels_xml, ct_xml, next_rid, stem = insert_photo_to_slot(
+            tbl_elem, photo_row, fname_row, col_idx,
+            photo_path, media_dir, img_idx,
+            rels_xml, ct_xml, next_rid, W
+        )
+        if stem is not None:
+            print(f"    → 挿入OK")
+            inserted += 1
+        else:
             skipped += 1
+        img_idx += 1
+
+    # ══════════════════════════════════════════════════════════
+    # フェーズ2：賞カテゴリ方式で銀賞・銅賞・入選スロットへ挿入
+    # ══════════════════════════════════════════════════════════
+    print(f"\n[フェーズ2] {', '.join(CATEGORY_AWARDS)}（賞カテゴリフォルダ方式）")
+
+    for award in CATEGORY_AWARDS:
+        print(f"\n  [{award}] 処理開始")
+        photos = collect_photos_for_award(photo_base, award)
+        slots  = slots_by_award[award]
+
+        if not photos:
+            print(f"  → 画像なし、スキップ")
+            skipped += len(slots)
             continue
 
-        # EMU サイズ計算（変換後ファイルで行う）
-        cy = TARGET_HEIGHT_EMU
-        cx = calc_emu_width(ready_path, cy)
+        for slot_idx, (tbl_elem, photo_row, fname_row, col_idx) in enumerate(slots):
+            if slot_idx >= len(photos):
+                print(f"  [スロット{slot_idx}] 画像不足 → スキップ")
+                skipped += 1
+                img_idx  += 1
+                continue
 
-        # メディアフォルダへコピー
-        final_ext        = ready_path.suffix.lower()
-        media_name       = f"img_{folder_idx:03d}{final_ext}"
-        final_media_path = media_dir / media_name
-        if ready_path != final_media_path:
-            shutil.copy2(ready_path, final_media_path)
-        if tmp_jpeg.exists() and tmp_jpeg != final_media_path:
-            tmp_jpeg.unlink()
+            folder_path, photo_path = photos[slot_idx]
+            print(f"  [スロット{slot_idx}] {folder_path.name} / {photo_path.name}")
+            rels_xml, ct_xml, next_rid, stem = insert_photo_to_slot(
+                tbl_elem, photo_row, fname_row, col_idx,
+                photo_path, media_dir, img_idx,
+                rels_xml, ct_xml, next_rid, W
+            )
+            if stem is not None:
+                print(f"    → 挿入OK")
+                inserted += 1
+            else:
+                skipped += 1
+            img_idx += 1
 
-        # リレーションシップ追加
-        r_id     = f"rId{next_rid}"
-        next_rid += 1
-        rels_xml = add_image_relationship(rels_xml, r_id, media_name)
-        ct_xml   = ensure_content_type(ct_xml, final_ext)
-
-        # DOM 更新
-        tbl  = tables[t_idx]
-        rows = tbl.findall(f"{{{W}}}tr")
-
-        photo_cell = rows[photo_row].findall(f"{{{W}}}tc")[col_idx]
-        for p in photo_cell.findall(f"{{{W}}}p"):
-            photo_cell.remove(p)
-        photo_cell.append(
-            etree.fromstring(build_image_paragraph_xml(r_id, media_name, cx, cy))
-        )
-
-        fname_cell = rows[fname_row].findall(f"{{{W}}}tc")[col_idx]
-        for p in fname_cell.findall(f"{{{W}}}p"):
-            fname_cell.remove(p)
-        fname_cell.append(
-            etree.fromstring(build_filename_paragraph_xml(stem))
-        )
-
-        print(f"  [{folder_idx:02d}] {folder_path.name} / {photo_path.name} → 挿入OK")
-        inserted += 1
-
-    # 書き戻し
+    # ── 書き戻し ──
     doc_xml_path.write_bytes(
         etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
     )
     rels_xml_path.write_text(rels_xml, encoding="utf-8")
-    ct_xml_path.write_text(ct_xml, encoding="utf-8")
+    ct_xml_path.write_text(ct_xml,   encoding="utf-8")
 
-    # ZIP 再パック
+    # ── ZIP 再パック ──
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zout:
         for fpath in sorted(tmp_dir.rglob("*")):
             if fpath.is_file():
