@@ -1,7 +1,7 @@
 import os
 from docx import Document
 from docx.shared import Mm
-# ファイルパスの設定33333333333333333333333333333
+# ファイルパスの設定334444444444444444
 # ファイルパスの設定
 docx_path = '防火ポスター入賞作品.docx'
 photo_folder = '写真'
